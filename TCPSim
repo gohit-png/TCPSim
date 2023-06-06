@@ -1,0 +1,231 @@
+#include <iostream>
+#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/tcp.h>
+#include <sys/time.h>
+#include <thread>
+#include <vector>
+
+using namespace std;
+
+
+void sendData(int sock, const char* data, int dataSize, int rate, int delay) {
+    // Calculate the number of chunks needed to send the data at the specified rate
+    int numChunks = dataSize / rate;
+    int remainingBytes = dataSize % rate;
+
+    // Send the data in chunks with the specified delay
+    for (int i = 0; i < numChunks; i++) {
+        int bytesSent = send(sock, data + (i * rate), rate, 0);
+        if (bytesSent == -1) {
+            cerr << "Error sending data" << endl;
+            break;
+        }
+        cout << "Sent " << bytesSent << " bytes" << endl;
+        usleep(delay);
+    }
+
+    // Send the remaining bytes if any
+    if (remainingBytes > 0) {
+        int bytesSent = send(sock, data + (numChunks * rate), remainingBytes, 0);
+        if (bytesSent == -1) {
+            cerr << "Error sending data" << endl;
+            return;
+        }
+        cout << "Sent " << bytesSent << " bytes" << endl;
+        usleep(delay);
+    }
+}
+
+void handleClient(int clientSock, int rate, int delay) {
+    // Receive data from client
+    char buffer[1024];
+    int bytesReceived;
+
+    while ((bytesReceived = recv(clientSock, buffer, sizeof(buffer), 0)) > 0) {
+        // Introduce delay before processing the received data
+        usleep(delay);
+        cout << "Received " << bytesReceived << " bytes: " << buffer << endl;
+
+        // Ask for user input to send data to the client
+        string message;
+        cout << "Enter a message to send to the client: ";
+        getline(cin, message);
+
+        const char* data = message.c_str();
+        int dataSize = message.length() + 1;
+
+        // Send data to the client
+        sendData(clientSock, data, dataSize, rate, delay);
+    }
+
+    close(clientSock);
+    cout << "Client disconnected" << endl;
+}
+
+
+
+int main(int argc, char *argv[]) {
+    // DEFAULT VALUES
+    string mode = "-s"; // 0 for server, 1 for client
+    string ip = "127.0.0.1";
+    int port = 8080;
+    int rate = 1024;
+    int delay = 0;
+    string option;
+
+    if (strcmp(argv[1], "-h") == 0) {
+        cout << "Usage: ./TCPsim [ -m mode ] [ -i ip ] [ -p port ] [ -r rate ] [ -d delay ] [ -o option ]" << endl;
+        cout << "Options:" << endl;
+        cout << "-m mode : Mode of operation. Choose 0 for server mode and 1 for client mode." << endl;
+        cout << "-i ip : IP address to bind/connect to." << endl;
+        cout << "-p port : Port number to bind/connect to." << endl;
+        cout << "-r rate : Rate of data flow in bytes." << endl;
+        cout << "-d delay : Delay of data in microseconds." << endl;
+        cout << "-o option : Socket option to set. Choose one of the following:" << endl;
+        cout << "-reuseaddr: Enable SO_REUSEADDR option." << endl;
+        cout << "-tcpnodelay: Enable TCP_NODELAY option." << endl;
+        cout << "-keepalive: Enable SO_KEEPALIVE option." << endl;
+
+        return -1;
+    }
+
+    if (argc == 7) {
+        mode = argv[1];
+        ip = argv[2];
+        port = atoi(argv[3]);
+        rate = atoi(argv[4]);
+        delay = atoi(argv[5]);
+        option = argv[6];
+    }
+
+    // Create TCP socket
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == -1) {
+        cerr << "Error creating socket" << endl;
+        return -1;
+    }
+    // Set socket options
+    int optval = 1;
+    if (option == "-reuseaddr") {
+        if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) == -1) {
+            cerr << "Error setting socket options" << endl;
+            return -1;
+        }
+        cout << "Selected option: SO_REUSEADDR" << endl;
+    } else if (option == "-tcpnodelay") {
+        if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval)) == -1) {
+            cerr << "Error setting socket options" << endl;
+            return -1;
+        }
+        cout << "Selected option: TCP_NODELAY" << endl;
+    } else if (option == "-keepalive") {
+        if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &optval, sizeof(optval)) == -1) {
+            cerr << "Error setting socket options" << endl;
+            return -1;
+        }
+        cout << "Selected option: SO_KEEPALIVE" << endl;
+    } else {
+        cerr << "Invalid socket option selected" << endl;
+        return -1;
+    }
+
+    // Listen for incoming connections (Server mode)
+    if (mode == "-s") {
+        // Bind socket to IP address and port number
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = inet_addr(ip.c_str());
+        addr.sin_port = htons(port);
+        if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
+            cerr << "Error binding socket" << endl;
+            return -1;
+        }
+
+        if (listen(sock, 10) == -1) {
+            cerr << "Error listening on socket" << endl;
+            return -1;
+        }
+
+        cout << "Server listening on " << ip << ":" << port << endl;
+
+        // Accept incoming connections
+        while (true) {
+            struct sockaddr_in clientAddr;
+            socklen_t clientAddrlen = sizeof(clientAddr);
+            int clientSock = accept(sock, (struct sockaddr *)&clientAddr, &clientAddrlen);
+            if (clientSock == -1) {
+                cerr << "Error accepting incoming connection" << endl;
+                return -1;
+            }
+            cout << "Client connected" << endl;
+            // Create a new thread to handle the client connection
+            thread clientThread(handleClient, clientSock, rate, delay);
+            clientThread.detach();
+        }
+    }
+    // Connect to server (Client mode)
+    else if (mode == "-c") {
+        struct sockaddr_in serverAddr;
+        memset(&serverAddr, 0, sizeof(serverAddr));
+        serverAddr.sin_family = AF_INET;
+        serverAddr.sin_addr.s_addr = inet_addr(ip.c_str());
+        serverAddr.sin_port = htons(port);
+        
+        if (connect(sock, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) == -1) {
+            cerr << "Error connecting to server" << endl;
+            return -1;
+        }
+
+        cout << "Connected to server successfully: " << ip << ":" << port << endl;
+
+        // Send and receive data with the server
+        string message;
+        cout << "Enter a message to send: ";
+        getline(cin, message);
+
+        const char* data = message.c_str();
+        int dataSize = message.length() + 1;
+
+        // Send data to server
+        sendData(sock, data, dataSize, rate, delay);
+
+        // Receive data from server
+        char buffer[1024];
+        int bytesReceived = recv(sock, buffer, sizeof(buffer), 0);
+        if (bytesReceived == -1) {
+            cerr << "Error receiving data from server" << endl;
+            return -1;
+        }
+
+        cout << "Received " << bytesReceived << " bytes: " << buffer << endl;
+    }
+
+    // Close socket
+    int opt;
+    cout << "Enter the option for close or shut down" << endl;
+    cout << "1. Close\n2. Shutdown on read\n3. Shutdown on write\n4. Shutdown on both read and write" << endl;
+    cin >> opt;
+    switch (opt) {
+        case 1:
+            close(sock);
+            break;
+        case 2:
+            shutdown(sock, SHUT_RD);
+            break;
+        case 3:
+            shutdown(sock, SHUT_WR);
+            break;
+        case 4:
+            shutdown(sock, SHUT_RDWR);
+            break;
+        default:
+            cout << "Enter the correct option" << endl;
+    }
+
+    return 0;
+}
